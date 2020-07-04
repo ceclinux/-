@@ -75,6 +75,55 @@ The may also be internally referred to as the forks of each relation; the free s
 
 ### Tablespaces
 
+Tablespaces in PostgresSQL allow databases administrators to define locations in the file system where the files representing database objects can be stored.Once created, a tablespace can be referred to by name when creating database objects.
+
+By using tablespaces, an administrator can control the disk layout of a PostgresSQL installation. This is useful in at least two ways. First, if the partition or volume on which the cluster was initialized runs out of space and cannot be extended, a tablespace can be created on a different partition and used until the system can be reconfigured.
+
+Second, tablespaces allow an administrator to use knowledge of the usage pattern of database objects to optimize performance. For example, an index which is very heavily used can be placed on a very fast, highly available disk, such as expensive solid state device. At the same time a table storing archived data which is rarely used or not performed critical could be stored on a less expensive, slower disk system.
+
 A Tablespace in PostgresSQL is an additional data area outside the base directory.
 
 ![](https://img.vim-cn.com/7a/bfb224a408f9253cd70ca6216b33cbf3f56d58.png )
+
+Inside the data file(heap table and index, as well as the free space map and visibility map), it is divided into pages(or blocks) of fixed length, the default is 8192 byte(8 KB). Those pages with each file are numbered sequentially from 0, and such numbers are called as **block numbers**. If the file has been filled up, Postgres adds a new empty page to the end of the file to increate the file size. 
+
+Internal layout of pages depends on the data file types. In this section, the table layout is described as the information will be required the following chapters.
+
+A page within a table contains three kinds of data described as follows:
+
+1. **heap tuple** - A heap tuple is a record data itself. They are stacked in order from the bottom of the page.
+
+2. **line pointer** - A line pointer is 4 byte long and holds a pointer to each heap tuple. It is also called an item pointer.
+
+Line pointers form a simple array, which plays the role of index to the tuples. Each index is numbered sequentially from 1, and called offset number. When a new tuple is added to the page, a new line pointer is also pushed n the the array to point to the new one.
+   
+3. **header data** -- A header data defined by the structure PageHeaderData is allocated in the beginning of the page. It is 24 byte long and contains general information about the page. The major variables of the structure are described below.
+   1. `pd_lsn` - This variable store the LSN of XLOG record written by the last change of the page. It is an 8-byte unsigned integer, related to the WAL.
+   2. `pg_checksum` - This variable store the checksum value of this page.
+   3. `pd_lower, pd_upper`  points to the end of line pointers, and `pd_upper` to the beginning of the newest heap tuple.
+   4. `pd_special` - This variable is for indexes. In the page within tables, it points to the end of the page. (In the page within indexes, it points to the beginning of special space which is the data area held only by the indexes and contains the particular data according the the kind of index types such as B-tree, Gist, Gin)
+
+An empty space between the end of line pointers and the beginning of the newest tuple is referred to as **free space or hole**.
+
+To identity a tuple with the table, **tuple identifier** is internally used. A TID comprises a pair of values: the block number that contains the tuple, and the offset number of the line pointer that points to the tuple.
+
+In addition, heap tuple whose size is greater than about 2KB (about 1/4 of 8KB) is stored and managed using a method called **TOAST**
+
+![](https://img.vim-cn.com/38/9f35e56e927269dc9dcd58f86ef69f5a87f1b6.png )
+
+### The methods of writing and reading tuples
+
+#### Write Heap tuples
+
+Suppose a table composed of one page which contains just one heap tuple. The `pd_lower` of this page point to the first line pointer, and both the line pointer and the `pd_upper` point to the first heap tuple.
+
+When the second tuple is inserted, it is placed after the first one. The second line pointer is pushed onto the first one, and it points to the second tuple. The `pd_lower` changes to point to the second line pointer, and the `pd_upper` to the second heap tuple.
+
+![](https://img.vim-cn.com/f5/cf9d0b4cb8189a8cefae6628950d9c65d8babd.png)
+
+#### Read Heap tables
+
+1. **Sequential scan** - All tuples in all pages are sequentially read by scanning all line pointers in each page.
+2. **B-tree index scan** - An index file contains index tuples, each of which is composed of an index key and a TID pointing to the target heap tuple. If the index tuple with the key that you are looking for has been found, PostgresSQL reads the desired tuple using the obtained TID value. For example, in the below figure, TID value of the obtained index tuple is  `(block = 7, Offset = 2)`. It means that the target heap tuple is 2nd tuple in the 7th page within the table, so PostgresSQL can read the desired heap tuple without unnecessary scanning in the pages.
+
+![](//img.vim-cn.com/c1/3121c81cc0542a1a61486cbe11767ba77ef640.png)
