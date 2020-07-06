@@ -3,3 +3,8 @@ txid
 txids
 Txids
 Tablespaces
+tablespace
+xmin
+xmax
+xip
+Transcation
