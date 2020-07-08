@@ -191,3 +191,102 @@ Transcation_A has been committed. The transcation manager removes the informatio
 
 Transcation_B and transcation_C execute their respective SELECT commands. Transcation_B requires a transcation snapshot because it is in the READ COMMITTED level. In this scenario, Transcation_B obtains a new snapshot '201:201:' because Transcation_A(txid 200) is committed. Thus, Transcation_A is no longer invisible from Transcation_B. Transcation_C does not require a transcation snapshot because it is in the REPEATABLE READ level and uses the obtained snapshot, i.e '200:200:'. Thus, Transaction_A is still invisible from Transcation_C.
 
+## Visibility Check rule
+
+Visibility check rules are a set of rules used to determine whether each tuple is visible or invisible using both the `t_xmin` and `t_xmax` of the tuple, the clog, and the obtained transcation snapshot.
+
+### Status of t_xmin is aborted
+
+A tuple whose `t_xmin` status is aborted is always invisible because transcation that inserted this tuple has been aborted.
+
+```
+Rule 1:
+If t_xmin status is 'ABORTED' THEN
+  RETURN 'Invisible'
+END IF
+```
+
+### Status of t_xmin is IN_PROGRESS
+
+A tuple whose t_xmin status is `IN_PROGRESS` is essentially invisible(Rules 3 and 4), except under one condition.
+
+```
+IF t_xmin status is 'IN_PROGRESS' THEN
+  IF t_xmin = current_txid THEN
+     IF t_xmax = INVALID THEN
+       RETURN 'Visible'
+     ELSE
+       RETURN 'Invisible'
+     END IF
+  ELSE 
+    RETURN 'Invisible'
+  END IF
+END IF
+```
+
+If this tuple is inserted by another transcation and the status of `t_xmin` is `IN_PROGRESS`, this tuple is obviously invisible.
+
+If `t_xmin` is equal to the current txid(i.e, this tuple is inserted by the current transcation) and `t_xmax` is not INVALID, this tuple is invisible because it has been updated or deleted by the current transcation.
+
+The exception condition is the case whereby this tuple is inserted by the current transcation and `t_xmax` is INVALID. In this case, this tuple is visible from the current transcation.
+
+```
+Rule 2: If Status(t_xmin) = IN_PROGRESS ^ t_xmin = current_txid ^ t_xmax = INVALID => Visible
+
+Rule 3: If Status(t_xmin) = IN_PROGRESS ^ t_xmin = current_txid ^ t_xmax not INVALID => Invisible
+
+Rule 4: If Status(t_xmin) = IN_PROGRESS ^ t_xmin not current_txid => Invisible
+```
+
+### Status of t_xmin is COMMITTED
+
+```
+     IF t_xmin status is 'COMMITTED' THEN
+     IF t_xmin is active in the obtained transcation snapshot THEN
+     RETURN 'Invisible'
+     ELSE IF t_xmax = INVALID OR status of t_xmax is 'ABORTED' THEN
+     RETURN 'Visible'
+     ELSE IF t_xmax status is 'IN_PROGRESS' THEN
+     IF t_xmax = current_txid THEN
+          RETURN 'Invisible'
+     ELSE
+          RETURN 'Visible'
+     END IF
+     ELSE IF t_xmax status is 'COMMITTED' THEN
+     IF t_xmax is active in the obtained transcation snapshot THEN
+          RETURN 'Visible'
+     ELSE 
+          RETURN 'Invisible'
+     END IF
+     END IF
+     END IF
+```
+
+Rule 6 is obvious because `t_xmax` is `INVALID` or `ABORTED`. Three exception conditions and both Rule 8 and 9 are described as follows.
+
+The first exception condition is that `t_xmin` is active in the obtained transcation snapshot. Under this condition, this tuple is invisible because `t_xmin` should be treated as in progress.
+
+The second exception condition is that `t_xmax` is the current txid(Rule 7). Under this condition, as with Rule 3, this tuple is invisible because it has been updated or deleted by this transcation itself.
+
+In contrast, if the status of `t_xmax` is `IN_PROGRESS` and `t_xmax` is not the current txid(Rule 8), the tuple is visible because it has not been deleted.
+
+The third exception condition is that the status of `t_xmax` is `COMMITTED`  and `t_xmax` is not active in the obtained transcation snapshot. Under this condition, this tuple is invisible because it has been updated or deleted by another transcation.
+
+In contrast, if the status of `t_xmax` is COMMITTED but `t_xmax` is active in the obtained transcation snapshot(Rule 9), the tuple is visible because `t_xmax` should be treated as in progress.
+
+```
+Rule 5: If Status(t_xmin) == COMMITTED ^ Snapshot(t_xmin) = active => Invisible
+
+Rule 6: If Status(t_xmin) == COMMITTED ^ (t_xmax = INVALID or Status(t_max) = ABORTED) = Visible
+
+Rule 7: If Status(t_xmin) = COMMITTED ^ Status(t_xmax) = INPROGRESS ^ t_xmax equal to current_txid => InVisible
+
+Rule 8: If Status(t_xmin) = COMMITTED ^ Status(t_xmax) = IN_PROGRESS ^ t_xmax is not current_txid => Visible
+
+Rule 9: If Statu(t_xmin) = COMMITTED ^ Status(t_xmax) = COMMITTED ^ Snapshot(t_xmax) = active => Visible
+
+Rule 10: If Status(t_xmin) = COMMITTED ^ Status(t_xmax) = COMMITTED ^ Snapshot(t_xmax) is not active => Invisible
+```
+
+## Phantom Reads in PostgresSQL Repeatable Read Level
+
