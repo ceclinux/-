@@ -290,3 +290,72 @@ Rule 10: If Status(t_xmin) = COMMITTED ^ Status(t_xmax) = COMMITTED ^ Snapshot(t
 
 ## Phantom Reads in PostgresSQL Repeatable Read Level
 
+RR as defined in the ANSI SQL-92 standard allow Phantom Reads. However, Postgres's implementation does not allow them. In principle, SI does not allow phantom reads.
+
+Assume that two transactions, i.e Tx_A and Tx_B, are running concurrently. The isolation level are READ COMMITTED and REPEATABLE READ, and their txids are 100 and 101, respectively. First, Tx_A inserts a tuple. Then, it is committed. Then `t_xmin` of the inserted tuple is 100. Next, `Tx_B` executes a `SELECT` command; however, the tuple inserted by `Tx_A` is invisible by Rule 5.
+
+Rule 5(new tuple): Status(t_xmin:100) = COMMITTED ^ Snapshot(x_xmin:100) = active => invisible
+
+
+## Preventing Lost Updates
+
+A Lost update, also known as a `ww-conflict`, is an anomaly that occurs when concurrent transactions update the same rows, and it must be prevented in both the `REPEATABLE READ` and `SERIALIZABLE` levels. This section describe how PostgresSQL prevents Lost Update and show examples.
+
+```
+
+FOR each row that will be updated by this UPDATE command
+  WHILE true
+    IF the target row is being updated THEN
+      WAIT for the termination of the transcation that updated the target row
+
+      IF(the status of the terminated transcation is COMMITTED)
+        AND (the isolation level of this transcation is REPEATABLE READ or SERIALIZABLE) THEN
+          ABORT this transcation
+      ELSE
+        GOTO step(2)
+      END IF
+    ELSE IF the target row has been updated by the another concurrent transcation THEN
+      IF the isolcation level of this transcation is READ COMMITTED THEN
+        UPDATE the target row
+      ELSE
+        ABORT the transcation
+      END IF
+     ELSE
+       UPDATEW the target row
+     END IF
+  END WHILE
+ END FOR 
+
+```
+
+## Serializable Snapshot Isolation
+
+Serializable Snapshot Isolation(SSI) has been embedded in SI since version 9.1 to realize a true SERIALIZABLE isolation level.
+
+### Basic Strategy for SSI Implementation
+
+If a cycle that is generated with some conflicts is present in the procedure graph, there will be a serialization anomaly. This is explained using the simplest anomaly. i.e Write-Skew
+
+Figure 5.12(1) shows a schedule. Here, Transcation_A reads tuple_B and Transcation_B reads tuple A. Then, Transcation_A writes Tuple_A and Transcation_B writes Tuple_B. In this case, there are two rw-conflicts, and they make a cycle in the procedure graph of this schedule. Thus, this schedule has a serialization anomaly. i.e. Write-Skew.
+
+![](https://img.vim-cn.com/03/b4ce6e467b63596761de878cf74bdf880c0a02.png)
+
+### Implementing SSI in PostgresSQL
+
+To realize the strategy described above, PostgreSQL has implemented many functions. However, here we uses only two data structures: SIREAD locks and rw-conflicts, to describe the SSI mechanism.
+
+## SIREAD locks:
+
+An SIREAD lock, internally called a predicate lock, is a pair of an object and (virtual) txids that store information about who has accessed with object. Note that the description of virtual txid is omitted. txid is used rather than virtual txid to simplify the following explanation.
+
+`SIREAD` locks are crated by the `CheckTargetForConflictsOut` function whenever one `DNL` command is executed `SERIALIZABLE` mode. For example, if txid 100 reads Tuple_1 of given table, an `SIREAD` lock {Tuple_1, {100}} is created. If another transcation, e.g, txid 101, reads Tuple_1, the `SIREAD` lock is updated to `{Tuple_1, {100, 101}}`. Note that a `SIREAD` lock is also created when an index page is read when an index page is read.
+
+`SIREAD` lock has three levels: tuple, page, and relation. If the `SIREAD` locks of all tuples within a single page are created, they are aggregated into a single `SIREAD` lock for that page, and all `SIREAD` locks of the associated tuples are released(removed), to reduce memory space. The same is true for all pages that are read.
+
+When creating an `SIREAD` lock for an index, the page level `SIREAD` lock is created from the beginning. When using sequential scan, a relation level `SIREAD` lock is created from the beginning regardless of presence of indexes and/or WHERE clauses.  Note that ,in certain situations, this implementation can cause false-positive detection of serialization anomalies. 
+
+A rw-conflict is a triplet of an `SIREAD` lock and two txids that reads and writes the `SIREAD` lock.
+
+The `CheckTargetForConflictsIn` function is invoked whenever either an `INSERT, UPDATE or DELETE` command is executed in `SERIALIZABLE` mode, and it creates `rw-conflicts` when detecting conflicts by checking `SIREAD` locks. For example, assume that txid 100 reads Tuple_1 and then txid 101 updates Tuple_1. In this case, the `CheckTargetForConflictsIn` function, invoked by the `UPDATE` command in txid 101, detects a rw-conflict with Tuple_1 between txid 100 and 101 then creates a rw-conflict `{r=100, w=101, {Tuple_1}}`
+
+The execution of concurrent SQL-transactions at isolation level SERIALIZABLE is guaranteed to be serializable. A serializable execution is defined to be an execution of the operations of concurrently executing SQL-transactions that produces the same effect as some serial execution of those same SQL-transactions. 
