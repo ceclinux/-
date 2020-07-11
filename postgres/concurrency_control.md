@@ -358,4 +358,51 @@ A rw-conflict is a triplet of an `SIREAD` lock and two txids that reads and writ
 
 The `CheckTargetForConflictsIn` function is invoked whenever either an `INSERT, UPDATE or DELETE` command is executed in `SERIALIZABLE` mode, and it creates `rw-conflicts` when detecting conflicts by checking `SIREAD` locks. For example, assume that txid 100 reads Tuple_1 and then txid 101 updates Tuple_1. In this case, the `CheckTargetForConflictsIn` function, invoked by the `UPDATE` command in txid 101, detects a rw-conflict with Tuple_1 between txid 100 and 101 then creates a rw-conflict `{r=100, w=101, {Tuple_1}}`
 
-The execution of concurrent SQL-transactions at isolation level SERIALIZABLE is guaranteed to be serializable. A serializable execution is defined to be an execution of the operations of concurrently executing SQL-transactions that produces the same effect as some serial execution of those same SQL-transactions. 
+The execution of concurrent SQL-transactions at isolation level SERIALIZABLE is guaranteed to be serializable. A serializable execution is defined to be an execution of the operations of concurrently executing SQL-transactions that produces the same effect as some serial execution of those same SQL-transactions.
+
+### False-positive Serialization Anomalies(PG 9.5)
+
+In `SERIALIZABLE` mode, the serializability of concurrent transactions is always fully guaranteed because false-negative serialization anomalies are never detected. However, under some circumstances, false-positive anomalies can be detected; therefore, users should keep this in mind when using `SERIALIZABLE` mode. In the following, the situation in which PostgreSQL detects false-positive anomalies are described.
+
+![](https://img.vim-cn.com/ec/432b90d78742062b5d59c6967728174c673fc3.jpg
+)
+
+When using sequential scan, as mentioned in the explanation of `SIREAD` locks, PostgresSQL creates a relation level `SIREAD` lock. Next figure shows `SIREAD` locks and rw-conflicts when PostgreSQL uses sequential scan. In this case, `rw-conflicts` C1 and C2, which are associated with the tbl's `SIREAD` lock, and they create a cycle in precedence graph. Thus, a false-positive `Write-Skew` anomaly is detected (and either Tx_A or Tx_B will be aborted even though there is no conflict)
+
+![](https://img.vim-cn.com/eb/4d1ea37880c7c6c4f202af7255ac76629174cf.png
+)
+
+## Required Maintenance Process
+
+PostgreSQL's concurrency control mechanism requires the following maintenance processes.
+
+1. Remove dead tuples and index tuples that point to corresponding dead tuples
+2. Remove unnecessary parts of the clog
+3. Freeze old txids
+4. Update FSM, VM, and the statistics
+
+## Freeing Processing
+
+Here, we describe the txid wraparound problem.
+
+Assume that tuple_1 is inserted with a txid of 100. i.e. The t_xmin Tuple_1 is 100. The server has been running for a very long period and Tuple_1 has not been modified. The current txid is 2.1 billion + 100 and a `SELECT` command is executed. At this time, Tuple_1 is visible because txid 100 is in the past. Then, the same `SELECT` command is execute; thus, the current txid is 2.1 billion + 101. However, Tuple_1 is no longer visible because txid 100 is in the future. This is so called transcation wraparound problem in PostgreSQL.
+
+![](https://img.vim-cn.com/94/c8c4f5b80064bc12c9f9122519cca13e2599f5.png
+)
+
+
+To deal with this problem, PostgreSQL introduced a concept called frozen txid, and implemented a process called `FREEZE`.
+
+In PostgreSQL, a frozen txid, which is a special reserved txid 2, is defined such that it is always older than all other txids. In other words, the frozen txid is always inactive and visible.
+
+The freeze process is invoked by the vacuum process. The freeze process scans all tables files and rewrites the `t_xmin` of tuples to the frozen txid if the `t_xmin` value is older than the current txid minus the `vacuum_freeze_min_age`(the default is 50 million). 
+
+For example, as can be seen in the next figure, the current txid is 50 million and the freeze process is invoked by the `VACUUM` command. In this case, the `t_xmin` of both `Tuple_1` and `Tuple_2` are rewritten to 2.
+
+In Version 9.4 or later, the XMIN_FORZEN bit is set to the `t_infomask` field of tuples rather than rewriting the `t_xmin` of tuples to the frozen txid.
+
+
+![](https://img.vim-cn.com/f7/5a71983e02da0ea032394264c7946ced0a2d4e.png
+)
+
+Please read 6.3.1
